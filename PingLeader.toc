@@ -3,6 +3,7 @@
 ## Notes: One click whispers the next Looking For Group leader who may still need you.
 ## Author: Michael
 ## Version: @project-version@
+## X-Curse-Project-ID: 1824876
 ## SavedVariablesPerCharacter: PingLeaderDB
 
 PingLeader.lua
