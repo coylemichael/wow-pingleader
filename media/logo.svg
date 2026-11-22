@@ -11,6 +11,10 @@
 
   <rect width="512" height="512" fill="url(#bg)"/>
 
+  <!-- everything below is scaled to 85% and centred, so it fits inside CurseForge's square crop.
+       Content spans about x 65-471, y 56-450 (centre 268,253) before scaling. -->
+  <g transform="translate(256 256) scale(0.85) translate(-268 -253)">
+
   <!-- speech bubble and its tail -->
   <g fill="#F6ECD6">
     <rect x="65" y="165" width="290" height="215" rx="55"/>
@@ -31,5 +35,6 @@
     <path d="M376.43,126.68 A34.5,34.5 0 0 1 400.82,151.07"/>
     <path d="M384.84,95.28 A67,67 0 0 1 432.22,142.66"/>
     <path d="M393.25,63.89 A99.5,99.5 0 0 1 463.61,134.25"/>
+  </g>
   </g>
 </svg>
