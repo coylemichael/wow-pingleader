@@ -1,0 +1,5 @@
+<Bindings>
+    <!-- CLICK bindings: the game presses these buttons itself. Names are set in PingLeader.lua. -->
+    <Binding name="CLICK PingLeaderButton:LeftButton" header="PINGLEADER" category="ADDONS"/>
+    <Binding name="CLICK LFGBrowseFrameRefreshButton:LeftButton" category="ADDONS"/>
+</Bindings>

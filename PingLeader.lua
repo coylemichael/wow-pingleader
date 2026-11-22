@@ -13,21 +13,26 @@
 --
 -- Nothing is ever sent automatically to someone it would not also invite to
 -- an open slot: automated whisper spam gets reported and can get the account
--- actioned.
+-- actioned. PingLeader never changes Blizzard's frames, so it cannot taint them.
+--
+-- Messages can use {class} {role} {level} {dungeon} {name}. Key bindings (in
+-- the game's Key Bindings, under AddOns) contact the next listing and refresh
+-- the LFG search.
 --
 --   /ping            contact the next listing
 --   /ping join       switch to "Join a group"
 --   /ping form       switch to "Form my group"
 --   /ping options    open the settings
---   /ping plan       show who it would invite and why
+--   /ping plan       show who is next, who is skipped, and why
 --   /ping list       show who would be contacted, without sending
 --   /ping dump       save the raw LFG data (then /reload) for debugging
 --   /ping msg <text> change the current mode's message
 --   /ping reset      forget who has been contacted
 --   /ping wait <min> minutes before the same person can be contacted again
 
-local DEFAULT_MSG = "Hey, Ret Paladin here if you still need a DPS."
+local DEFAULT_MSG = "Hey, {class} {role} here if you still need one for {dungeon}."
 local DEFAULT_WAIT = 30      -- minutes
+local STALE = 60             -- seconds before the results count as old
 local INVITE_TIMEOUT = 120   -- seconds an unanswered invite holds its slot
 local AUTO_GAP = 2           -- seconds between automatic invites
 local MAX_ROWS = 15          -- listings shown in the plan popup
@@ -90,6 +95,7 @@ local function DB()
     if f.invite == nil then f.invite = true end
     if f.auto == nil then f.auto = false end
     if f.dryrun == nil then f.dryrun = true end
+    f.minLevel = tonumber(f.minLevel) or 0
     if not f.classes then
         f.classes = {}
         for _, c in ipairs(CLASSES) do f.classes[c] = true end
@@ -117,6 +123,78 @@ end
 local function RecentlyContacted(db, name, now)
     local last = db.sent[name]
     return last and now - last < db.wait * 60 and last or nil
+end
+
+-- "Tank/DPS" for a set of role keys, or nil if none is set.
+local function RoleList(roles)
+    local out = {}
+    for _, r in ipairs(ROLES) do
+        if roles[r[1]] then out[#out + 1] = r[2] end
+    end
+    return #out > 0 and table.concat(out, "/") or nil
+end
+
+-- Name of the first activity in a listing or in your own entry, or nil.
+local function ActivityName(entry)
+    local ok, name = pcall(function()
+        if not Readable(entry) or not C_LFGList.GetActivityInfoTable then return end
+        local id = Plain(entry.activityID)
+        if not id and Readable(entry.activityIDs) then id = Plain(entry.activityIDs[1]) end
+        if type(id) ~= "number" then return end
+        local a = C_LFGList.GetActivityInfoTable(id)
+        if not Readable(a) then return end
+        local n = Plain(a.fullName)
+        if type(n) == "string" and n ~= "" then return n end
+    end)
+    return ok and name or nil
+end
+
+-- The message with {class} {role} {level} {dungeon} {name} filled in for
+-- target e. A value the game doesn't give is left out, with its spacing.
+local PLACEHOLDERS = { class = true, role = true, level = true, dungeon = true, name = true }
+local function Fill(msg, e)
+    local _, db = M()
+    local dungeon = e.activity
+    if not dungeon and C_LFGList.GetActiveEntryInfo then
+        local ok, entry = pcall(C_LFGList.GetActiveEntryInfo)
+        dungeon = ok and ActivityName(entry) or nil
+    end
+    local values = {
+        class = Plain((UnitClass("player"))),
+        level = Plain(UnitLevel("player")),
+        role = e.role and ROLE_NAME[e.role] or (db.mode == "join" and RoleList(db.join.roles)) or nil,
+        dungeon = dungeon,
+        name = e.name,
+    }
+    local out = msg:gsub("{(%a+)}", function(key)
+        key = key:lower()
+        if PLACEHOLDERS[key] then return values[key] and tostring(values[key]) or "" end
+    end)
+    out = out:gsub("%s+([,.!?])", "%1"):gsub("%s%s+", " ")
+    -- "for ." left by a missing value reads badly: drop the dangling word
+    for _, word in ipairs({ "for", "in", "at", "to" }) do
+        out = out:gsub("%s+" .. word .. "([,.!?])", "%1"):gsub("%s+" .. word .. "%s*$", "")
+    end
+    return strtrim(out)
+end
+
+-- True while the game stops addons sending chat messages (some fights).
+local function WhisperBlocked()
+    local f = C_ChatInfo and C_ChatInfo.InChatMessagingLockdown
+    if type(f) ~= "function" then return false end
+    local ok, locked = pcall(f)
+    return ok and Plain(locked) == true
+end
+
+local resultsAt -- GetTime() of the last search results
+
+-- How old the LFG results are, as a short sentence.
+local function AgeText()
+    if not resultsAt then return "|cffffd200No search yet: press Refresh in the LFG window.|r" end
+    local age = math.floor(GetTime() - resultsAt)
+    local text = age < 60 and ("%ds"):format(age) or ("%d min"):format(math.floor(age / 60))
+    if age < STALE then return "Results are " .. text .. " old." end
+    return "|cffffd200Results are " .. text .. " old: press Refresh (addons can't search by themselves).|r"
 end
 
 local function ResultIDs()
@@ -171,18 +249,47 @@ local function WantsRole(id, roles)
     return not any
 end
 
--- Leader name and size of a group listing that has room for a ticked role.
-local function GroupCandidate(id, roles)
-    local ok, leader, members = pcall(function()
+-- A group listing (2+ members) as a plan row, or nil for anything else.
+-- row.why is set when it doesn't fit the join settings.
+local function GroupRow(id, roles)
+    local ok, row = pcall(function()
         local info = C_LFGList.GetSearchResultInfo(id)
         if not Readable(info) or Plain(info.isDelisted) then return end
         local leader, members = Plain(info.leaderName), Plain(info.numMembers)
         if type(leader) ~= "string" or leader == "" or IsMe(leader) then return end
-        if type(members) ~= "number" or members < 2 or members >= 5 then return end -- full groups
-        if not WantsRole(id, roles) then return end
-        return leader, members
+        if type(members) ~= "number" or members < 2 then return end -- solo players are Form mode's
+        local row = { name = leader, members = members, class = LeaderClass(id, members), activity = ActivityName(info) }
+        if members >= 5 then
+            row.why = "the group is full"
+        elseif not WantsRole(id, roles) then
+            row.why = "no room for " .. (RoleList(roles) or "you")
+        end
+        return row
     end)
-    if ok then return leader, members end
+    return ok and row or nil
+end
+
+-- Every group listing, in the order clicks would contact them, then the rest
+-- with why they're skipped.
+local function JoinPlan()
+    local db, now = DB(), time()
+    local picks, skips, seen = {}, {}, {}
+    for _, id in ipairs(ResultIDs()) do
+        local row = GroupRow(id, db.join.roles)
+        if row and not seen[row.name] then
+            seen[row.name] = true
+            local last = not row.why and RecentlyContacted(db, row.name, now)
+            if last then
+                row.why = ("contacted %d min ago, again in %d min"):format(math.floor((now - last) / 60),
+                    math.ceil((last + db.wait * 60 - now) / 60))
+            end
+            if row.why then skips[#skips + 1] = row else picks[#picks + 1] = row end
+        end
+    end
+    local rows = {}
+    for _, r in ipairs(picks) do rows[#rows + 1] = r end
+    for _, r in ipairs(skips) do rows[#rows + 1] = r end
+    return { mode = "join", rows = rows, picks = picks }
 end
 
 -- Form my group ---------------------------------------------------------------
@@ -269,7 +376,7 @@ local function Solo(id)
         if not Readable(info) or Plain(info.isDelisted) or Plain(info.numMembers) ~= 1 then return end
         local name = Plain(info.leaderName)
         if type(name) ~= "string" or name == "" or IsMe(name) then return end
-        local row = { name = name, members = 1, roles = {} }
+        local row = { name = name, members = 1, roles = {}, activity = ActivityName(info) }
         local p = C_LFGList.GetSearchResultPlayerInfo and C_LFGList.GetSearchResultPlayerInfo(id, 1)
         if Readable(p) then
             row.class, row.level = Plain(p.classFilename), Plain(p.level)
@@ -325,6 +432,8 @@ local function FormPlan()
                 row.why = ("contacted %d min ago"):format(math.floor((now - last) / 60))
             elseif not AllClasses(classes) and not classes[row.class or ""] then
                 row.why = (ClassName(row.class) or "unknown class") .. " is not ticked"
+            elseif db.form.minLevel > 0 and type(row.level) == "number" and row.level < db.form.minLevel then
+                row.why = ("level %d is below your minimum of %d"):format(row.level, db.form.minLevel)
             elseif not offers then
                 row.why = "the game doesn't show their roles"
             else
@@ -347,47 +456,46 @@ local function FormPlan()
     local rows = {}
     for _, r in ipairs(picks) do rows[#rows + 1] = r end
     for _, r in ipairs(skips) do rows[#rows + 1] = r end
-    return { rows = rows, picks = picks, need = need, me = me, size = size, out = out }
+    return { mode = "form", rows = rows, picks = picks, need = need, me = me, size = size, out = out }
 end
 
--- Everyone the next click would contact, in order: { name, members, role },
--- plus the forming plan in "Form my group" mode.
+-- Everyone the next click would contact, in order ({ name, members, role,
+-- activity }), and the plan they come from.
 local function Pending()
-    local db, now = DB(), time()
-    if db.mode == "form" then
-        local plan = FormPlan()
-        return plan.picks, plan
-    end
-    local list, seen = {}, {}
-    for _, id in ipairs(ResultIDs()) do
-        local leader, members = GroupCandidate(id, db.join.roles)
-        if leader and not seen[leader] and not RecentlyContacted(db, leader, now) then
-            seen[leader] = true
-            list[#list + 1] = { name = leader, members = members }
-        end
-    end
-    return list
+    local plan = DB().mode == "form" and FormPlan() or JoinPlan()
+    return plan.picks, plan
 end
 
 local function Contact(e)
     local m, db = M()
-    local done, key = {}, Norm(e.name)
+    local done, acted, key = {}, false, Norm(e.name)
     if m.whisper and m.msg ~= "" then
-        Send(m.msg, "WHISPER", nil, e.name)
-        done[#done + 1] = "whispered " .. e.name
+        if WhisperBlocked() then
+            done[#done + 1] = "the game is blocking addon whispers right now, so " .. e.name .. " got no whisper"
+        else
+            Send(Fill(m.msg, e), "WHISPER", nil, e.name)
+            done[#done + 1] = "whispered " .. e.name
+            acted = true
+        end
     end
     if m.invite then
         if db.mode == "join" then
             RequestInvite(e.name)
             done[#done + 1] = "asked to join " .. e.name .. "'s group"
         else
-            Invite(e.name)
+            Invite(e.name) -- from a non-leader, the game turns this into a suggestion to the leader
             invited[key] = { t = time(), role = e.role }
             roleOf[key] = e.role
-            done[#done + 1] = "invited " .. e.name .. (e.role and (" as " .. ROLE_NAME[e.role]) or "")
+            local as = e.role and (" as " .. ROLE_NAME[e.role]) or ""
+            if IsInGroup() and not UnitIsGroupLeader("player") then
+                done[#done + 1] = "suggested " .. e.name .. as .. " to your group leader"
+            else
+                done[#done + 1] = "invited " .. e.name .. as
+            end
         end
+        acted = true
     end
-    db.sent[e.name] = time()
+    if acted then db.sent[e.name] = time() end
     Print(table.concat(done, ", "))
 end
 
@@ -426,9 +534,8 @@ local function CreatePopup()
     popup:SetScript("OnDragStop", popup.StopMovingOrSizing)
     popup:Hide()
 
-    local title = popup:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-    title:SetPoint("TOP", 0, -12)
-    title:SetText("PingLeader: who it would invite, and why")
+    popup.title = popup:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    popup.title:SetPoint("TOP", 0, -12)
     local close = CreateFrame("Button", nil, popup, "UIPanelCloseButton")
     close:SetPoint("TOPRIGHT", -2, -2)
     close:SetScript("OnClick", function() popup:Hide() end)
@@ -440,7 +547,11 @@ local function CreatePopup()
     popup.rows = {}
     for i = 1, MAX_ROWS do
         local t = popup:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-        t:SetPoint("TOPLEFT", 14, -66 - (i - 1) * 15)
+        if i == 1 then
+            t:SetPoint("TOPLEFT", popup.head, "BOTTOMLEFT", 0, -8)
+        else
+            t:SetPoint("TOPLEFT", popup.rows[i - 1], "BOTTOMLEFT", 0, -3)
+        end
         t:SetWidth(432)
         t:SetJustifyH("LEFT")
         t:SetWordWrap(false)
@@ -448,43 +559,80 @@ local function CreatePopup()
     end
 end
 
+local function NotLeader()
+    return IsInGroup() and not UnitIsGroupLeader("player")
+end
+
+-- Header lines for the join plan: what a click does and who is next.
+local function JoinHead(plan)
+    local j = DB().join
+    local act = j.whisper and j.invite and "whisper + ask to join" or j.invite and "ask to join"
+        or j.whisper and "whisper" or "nothing (tick an Action)"
+    local first = plan.picks[1]
+    return ("Each click: %s the next leader whose group has room for %s.\nNext: %s"):format(act,
+        RoleList(j.roles) or "anyone", first and first.name or "nobody")
+end
+
+-- Header lines for the forming plan: your group and what auto-invite will do.
+local function FormHead(plan)
+    local f = DB().form
+    local mode
+    if NotLeader() then
+        mode = "|cffff6060You're not the group leader:|r Invite next suggests players to your leader. Auto-invite waits."
+    elseif not f.invite then
+        mode = "Group invite is off: nobody will be invited."
+    elseif not f.auto then
+        mode = "Auto-invite is off: click Invite next to invite the next one."
+    elseif f.dryrun then
+        mode = "|cffffd200Dry run: nobody is invited.|r Untick Dry run to invite for real."
+    else
+        mode = "|cff33ff33Auto-invite is on.|r"
+    end
+    return GroupStatus(plan) .. "\n" .. mode
+end
+
+-- One popup line for a plan row; i is its place among the picks.
+local function RowText(plan, row, i)
+    local tag
+    if not i then
+        tag = "|cff888888skip|r"
+    elseif plan.mode == "form" and DB().form.auto then
+        tag = "|cff33ff33INVITE|r"
+    else
+        tag = i == 1 and "|cff33ff33NEXT|r" or "|cff33ff33then|r"
+    end
+    local who = Colored(row.name, row.class)
+    if plan.mode == "join" then
+        who = who .. (" (%d/5)"):format(row.members)
+        local why = row.why or ("room for " .. (RoleList(DB().join.roles) or "anyone"))
+        return ("%s  %s - %s%s"):format(tag, who, why, row.activity and (", " .. row.activity) or "")
+    end
+    return ("%s  %s%s - %s"):format(tag, who, row.level and (" " .. row.level) or "", row.why)
+end
+
 local function UpdatePopup(plan)
     if not (popup and popup:IsShown()) then return end
-    local f = DB().form
     local lines = {}
-    if not plan then
-        popup.head:SetText("You're in \"Join a group\" mode. Pick \"Form my group\" in the settings (the cog) to see who it would invite.")
-    else
-        local mode
-        if IsInGroup() and not UnitIsGroupLeader("player") then
-            mode = "|cffff6060You're not the group leader, so you can't invite.|r"
-        elseif not f.invite then
-            mode = "Group invite is off: nobody will be invited."
-        elseif not f.auto then
-            mode = "Auto-invite is off: click Invite next to invite the first one."
-        elseif f.dryrun then
-            mode = "|cffffd200Dry run: nobody is invited.|r Untick Dry run to invite for real."
-        else
-            mode = "|cff33ff33Auto-invite is on.|r"
-        end
-        popup.head:SetText(GroupStatus(plan) .. "\n" .. mode)
-        for _, row in ipairs(plan.rows) do
-            local tag = row.role and "|cff33ff33INVITE|r" or "|cff888888skip|r"
-            lines[#lines + 1] = ("%s  %s%s - %s"):format(tag, Colored(row.name, row.class),
-                row.level and (" " .. row.level) or "", row.why)
-        end
-        if #lines == 0 then lines[1] = "No solo players in the results. Hit refresh in the LFG window." end
-        if #lines > MAX_ROWS then
-            local more = #lines - MAX_ROWS + 1
-            for i = MAX_ROWS + 1, #lines do lines[i] = nil end
-            lines[MAX_ROWS] = ("... and %d more"):format(more)
-        end
+    local join = plan.mode == "join"
+    popup.title:SetText(join and "PingLeader: who's next, and why" or "PingLeader: who it would invite, and why")
+    popup.head:SetText((join and JoinHead(plan) or FormHead(plan)) .. "\n" .. AgeText())
+    local place = {}
+    for i, row in ipairs(plan.picks) do place[row] = i end
+    for _, row in ipairs(plan.rows) do lines[#lines + 1] = RowText(plan, row, place[row]) end
+    if #lines == 0 then
+        lines[1] = join and "No groups in the results. Pick a dungeon and press Refresh in the LFG window."
+            or "No solo players in the results. Pick a dungeon and press Refresh in the LFG window."
+    end
+    if #lines > MAX_ROWS then
+        local more = #lines - MAX_ROWS + 1
+        for i = MAX_ROWS + 1, #lines do lines[i] = nil end
+        lines[MAX_ROWS] = ("... and %d more"):format(more)
     end
     for i, t in ipairs(popup.rows) do
         t:SetText(lines[i] or "")
         t:SetShown(lines[i] ~= nil)
     end
-    popup:SetHeight(76 + #lines * 15)
+    popup:SetHeight(34 + popup.head:GetStringHeight() + 8 + #lines * 15 + 14)
 end
 
 -- Refresh and auto-invite -----------------------------------------------------
@@ -494,8 +642,8 @@ local autoWait = false
 
 local function AutoInvite(plan)
     local f = DB().form
-    if autoWait or not (f.auto and f.invite) or f.dryrun then return end
-    if IsInGroup() and not UnitIsGroupLeader("player") then return end
+    if plan.mode ~= "form" or autoWait or not (f.auto and f.invite) or f.dryrun then return end
+    if NotLeader() then return end
     local e = plan.picks[1]
     if not e then return end
     autoWait = true
@@ -504,6 +652,28 @@ local function AutoInvite(plan)
         autoWait = false
         Refresh()
     end)
+end
+
+-- Opt-in sound when someone new becomes a pick (a new group to ask, or a new
+-- player who fits), so you can do something else while waiting. Silent while
+-- auto-invite handles the picks itself.
+local heard, lastSound = {}, 0
+local function Announce(plan)
+    local m, db = M()
+    local f = db.form
+    local new = false
+    for _, e in ipairs(plan.picks) do
+        local key = plan.mode .. ":" .. Norm(e.name)
+        if not heard[key] then
+            heard[key] = true
+            new = true
+        end
+    end
+    if not new or not m.sound then return end
+    if plan.mode == "form" and f.auto and f.invite and not f.dryrun then return end
+    if GetTime() - lastSound < 5 then return end
+    lastSound = GetTime()
+    pcall(PlaySound, SOUNDKIT and SOUNDKIT.IG_PLAYER_INVITE or 880, "Master")
 end
 
 -- Button label for the current mode and actions, e.g. "Invite next".
@@ -522,9 +692,10 @@ Refresh = function()
         button:SetText(("%s (%d)"):format(Verb(), #list))
         button:SetEnabled(#list > 0 and (m.whisper or m.invite))
     end
-    if panel and plan then panel.status:SetText(GroupStatus(plan)) end
+    if panel and plan.mode == "form" then panel.status:SetText(GroupStatus(plan)) end
     UpdatePopup(plan)
-    if plan then AutoInvite(plan) end
+    Announce(plan)
+    AutoInvite(plan)
 end
 
 local function ShowPlan(show)
@@ -557,9 +728,9 @@ end
 
 local checks, edits, tabs = {}, {}, {}
 local MODES = {
-    join = { tab = "Join a group", height = 270,
+    join = { tab = "Join a group", height = 322,
         desc = "Whisper or ask to join leaders of groups that still need your role. One per click." },
-    form = { tab = "Form my group", height = 405,
+    form = { tab = "Form my group", height = 430,
         desc = "Invite solo players of the classes you tick into the roles your group still needs." },
 }
 
@@ -636,7 +807,30 @@ local function MessageBox(parent, label, y, s)
     edit.s = s
     box:EnableMouse(true)
     box:SetScript("OnMouseDown", function() edit:SetFocus() end)
+    -- placeholders, and a preview filled in for whoever is next
+    box:SetScript("OnEnter", function(self)
+        local e = Pending()[1] or { name = "Rat Loot" }
+        GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Placeholders")
+        GameTooltip:AddLine("{class} your class, {level} your level, {name} who you message", 1, 1, 1, true)
+        GameTooltip:AddLine("{role} your ticked roles (Join) or the open slot (Form)", 1, 1, 1, true)
+        GameTooltip:AddLine("{dungeon} the listing's dungeon", 1, 1, 1, true)
+        if s.msg ~= "" then
+            GameTooltip:AddLine(" ")
+            GameTooltip:AddLine("To " .. e.name .. ": " .. Fill(s.msg, e), 1, 0.82, 0, true)
+        end
+        GameTooltip:Show()
+    end)
+    box:SetScript("OnLeave", GameTooltip_Hide)
     edits[#edits + 1] = edit
+end
+
+-- Opt-in sound checkbox for settings table s.
+local function SoundCheck(parent, s, y)
+    local c = Check(parent, "Sound on new match", function() return s.sound end, function(v) s.sound = v end)
+    c:SetPoint("TOPLEFT", 10, y)
+    Tip(c, "Sound on new match", "Plays the invite sound when someone new shows up who you'd contact, so you can do "
+        .. "something else while you wait. You still have to press Refresh: addons can't search by themselves.")
 end
 
 -- Show the current mode's options and mark its tab.
@@ -666,11 +860,13 @@ local function SyncPanel()
     for _, e in ipairs(edits) do
         if not e:HasFocus() then e:SetText(e.s.msg) end
     end
+    local lvl, min = panel.minLevel, DB().form.minLevel
+    if lvl and not lvl:HasFocus() then lvl:SetText(min > 0 and tostring(min) or "") end
     ApplyMode()
 end
 
 local function JoinOptions(parent, j)
-    MessageBox(parent, "Message", 0, j)
+    MessageBox(parent, "Whisper message (hover for placeholders)", 0, j)
     Label(parent, "Action", 14, -84)
     Check(parent, "Send whisper", function() return j.whisper end, function(v) j.whisper = v end)
         :SetPoint("TOPLEFT", 10, -98)
@@ -683,10 +879,12 @@ local function JoinOptions(parent, j)
         Check(parent, r[2], function() return j.roles[key] end, function(v) j.roles[key] = v or nil end)
             :SetPoint("TOPLEFT", 10 + (i - 1) * 70, -142)
     end
+    SoundCheck(parent, j, -168)
+    SmallButton(parent, "Show plan", 96, function() ShowPlan() end):SetPoint("BOTTOMRIGHT", -14, 12)
 end
 
 local function FormOptions(parent, f)
-    MessageBox(parent, "Message (sent only if Send whisper is ticked)", 0, f)
+    MessageBox(parent, "Whisper message (hover for placeholders)", 0, f)
     Label(parent, "Action", 14, -84)
     Check(parent, "Send whisper", function() return f.whisper end, function(v) f.whisper = v end)
         :SetPoint("TOPLEFT", 10, -98)
@@ -705,19 +903,37 @@ local function FormOptions(parent, f)
     end)
     dry:SetPoint("TOPLEFT", 130, -120)
     Tip(dry, "Dry run", "Auto-invite invites nobody. The plan popup shows who it would invite and why.")
+    SoundCheck(parent, f, -142)
+    Label(parent, "Min level", 150, -147)
+    local lvl = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
+    lvl:SetSize(28, 18)
+    lvl:SetPoint("TOPLEFT", 206, -143)
+    lvl:SetAutoFocus(false)
+    lvl:SetNumeric(true)
+    lvl:SetMaxLetters(2)
+    lvl:SetScript("OnTextChanged", function(self, user)
+        if user then
+            f.minLevel = tonumber(self:GetText()) or 0
+            Refresh()
+        end
+    end)
+    lvl:SetScript("OnEnterPressed", lvl.ClearFocus)
+    lvl:SetScript("OnEscapePressed", lvl.ClearFocus)
+    Tip(lvl, "Min level", "Skips solo players below this level. Leave it empty for no minimum.")
+    panel.minLevel = lvl
 
-    Label(parent, "Your group", 14, -150)
+    Label(parent, "Your group", 14, -172)
     panel.status = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    panel.status:SetPoint("TOPLEFT", 14, -164)
+    panel.status:SetPoint("TOPLEFT", 14, -186)
     panel.status:SetWidth(222)
     panel.status:SetJustifyH("LEFT")
 
-    Label(parent, "Classes to invite", 14, -194)
+    Label(parent, "Classes to invite", 14, -216)
     for i, cls in ipairs(CLASSES) do
         local color = RAID_CLASS_COLORS and RAID_CLASS_COLORS[cls]
         Check(parent, ClassName(cls), function() return f.classes[cls] end,
             function(v) f.classes[cls] = v or nil end, color)
-            :SetPoint("TOPLEFT", 10 + ((i - 1) % 3) * 78, -208 - math.floor((i - 1) / 3) * 22)
+            :SetPoint("TOPLEFT", 10 + ((i - 1) % 3) * 78, -230 - math.floor((i - 1) / 3) * 22)
     end
     local function SetAll(v)
         for _, cls in ipairs(CLASSES) do f.classes[cls] = v or nil end
@@ -804,11 +1020,13 @@ local function CreateButton()
     button:SetScript("OnShow", Refresh)
     button:SetScript("OnEnter", function(self)
         local m, db = M()
+        local e = Pending()[1]
         GameTooltip:SetOwner(self, "ANCHOR_TOP")
         GameTooltip:SetText("PingLeader: " .. MODES[db.mode].tab)
-        GameTooltip:AddLine("Click: " .. Verb():lower(), 1, 1, 1)
+        GameTooltip:AddLine("Click: " .. Verb():lower() .. (e and (" " .. e.name) or ""), 1, 1, 1)
         GameTooltip:AddLine("Right-click: settings and mode", 1, 1, 1)
-        if m.whisper and m.msg ~= "" then GameTooltip:AddLine(m.msg, 1, 0.82, 0, true) end
+        if e and m.whisper and m.msg ~= "" then GameTooltip:AddLine(Fill(m.msg, e), 1, 0.82, 0, true) end
+        GameTooltip:AddLine(AgeText(), 0.8, 0.8, 0.8, true)
         GameTooltip:Show()
     end)
     button:SetScript("OnLeave", GameTooltip_Hide)
@@ -939,14 +1157,27 @@ events:SetScript("OnEvent", function(_, event, arg1, arg2)
         end
     elseif event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" then
         if arg1 == "PingLeader" then
-            DB().form.auto = false
-            if panel and panel:IsShown() then SyncPanel() end
-            Print(("the game blocked %s, so Auto-invite is off. Click Invite next instead."):format(tostring(arg2)))
+            local what = tostring(arg2)
+            if what:find("Chat") then
+                Print("the game blocked the whisper (addons can't message during some fights). Try again later.")
+            else
+                DB().form.auto = false
+                if panel and panel:IsShown() then SyncPanel() end
+                Print(("the game blocked %s, so Auto-invite is off. Click Invite next instead."):format(what))
+            end
         end
     else
+        if event == "LFG_LIST_SEARCH_RESULTS_RECEIVED" then resultsAt = GetTime() end
         Refresh()
     end
 end)
+
+-- Key Bindings > AddOns > PingLeader. CLICK bindings are pressed by the game
+-- itself, so refreshing Blizzard's search this way is a real key press and
+-- doesn't run through (or taint) PingLeader's code. See Bindings.xml.
+BINDING_HEADER_PINGLEADER = "PingLeader"
+_G["BINDING_NAME_CLICK PingLeaderButton:LeftButton"] = "Contact the next listing"
+_G["BINDING_NAME_CLICK LFGBrowseFrameRefreshButton:LeftButton"] = "Refresh the Looking For Group search"
 
 SLASH_PINGLEADER1 = "/ping"
 SLASH_PINGLEADER2 = "/pingleader"

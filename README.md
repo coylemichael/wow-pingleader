@@ -9,19 +9,36 @@ It has two modes, picked at the top of its settings:
   still need one of your ticked roles. One per click.
 - **Form my group** works out which roles your 5-player group still needs
   (1 tank, 1 healer, 3 DPS, counting your own role and unanswered invites) and
-  invites solo players of the ticked classes who list one of them. "Invite
-  next" invites one per click; "Auto-invite" invites them as they show up.
-  "Dry run" invites nobody and shows who it would invite and why.
+  invites solo players of the ticked classes, and above your minimum level,
+  who list one of them. "Invite next" invites one per click; "Auto-invite"
+  invites them as they show up. "Dry run" invites nobody and shows who it
+  would invite and why. If you're not the group leader, the game turns each
+  invite into a suggestion to your leader.
 
 It never messages anyone it would not also invite to an open slot: automated
-whisper spam gets reported and can get an account actioned.
+whisper spam gets reported and can get an account actioned. Each person is
+contacted once per wait period (30 minutes by default).
+
+- **Plan popup** (`/ping plan` or "Show plan"): who is next, who is skipped
+  and why (full, no room for your role, contacted 4 min ago, class not
+  ticked...), and how old the results are. Addons can't search by
+  themselves, so it tells you when to press Refresh.
+- **Message placeholders**: `{class}` `{role}` `{level}` `{dungeon}` `{name}`.
+  Hover the message box for a preview. A value the game doesn't give is left
+  out, with its dangling "for".
+- **Key bindings** (Key Bindings > AddOns > PingLeader): contact the next
+  listing, and refresh the Looking For Group search.
+- **Sound on new match**, off unless you tick it.
+- It never changes Blizzard's frames, so it can't taint them, and it skips
+  anyone the game hides during fights. While the game blocks addon whispers,
+  it says so instead of sending.
 
 | Command | Does |
 |---|---|
 | `/ping` | Contact the next listing |
 | `/ping join`, `/ping form` | Switch mode |
 | `/ping options` | Open the settings (or right-click the button) |
-| `/ping plan` | Show who it would invite and why |
+| `/ping plan` | Show who is next, who is skipped, and why |
 | `/ping list` | Show who would be contacted, without sending |
 | `/ping msg <text>` | Change the current mode's message |
 | `/ping reset` | Forget who has been contacted |
