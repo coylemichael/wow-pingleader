@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: PingLeader
-## Notes: One click contacts the next Looking For Group listing, one person at a time: join a group, or fill your own.
+## Notes: One click contacts the next Looking For Group listing: join a group, or fill your own, with optional auto-invite.
 ## Author: Michael
 ## Version: @project-version@
 ## X-Curse-Project-ID: 1824876

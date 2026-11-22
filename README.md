@@ -10,16 +10,17 @@ It has two modes, picked at the top of its settings:
 - **Form my group** works out which roles your 5-player group still needs
   (1 tank, 1 healer, 3 DPS, counting your own role and unanswered invites) and
   invites solo players of the ticked classes, and above your minimum level,
-  who list one of them. "Invite next" invites one per click; "Auto-invite"
-  invites them as they show up. "Dry run" invites nobody and shows who it
-  would invite and why. If you're not the group leader, the game turns each
+  who list one of them. "Invite next" invites one per click; "Auto-invite",
+  off unless you tick it, invites them as they show up, one every 2 seconds,
+  until the group is full. If you're not the group leader, the game turns each
   invite into a suggestion to your leader.
 
 It never messages anyone it would not also invite to an open slot: automated
 whisper spam gets reported and can get an account actioned. Each person is
 contacted once per wait period (30 minutes by default).
 
-- **Plan popup** (`/ping plan` or "Show plan"): who is next, who is skipped
+- **Plan popup** (`/ping plan` or "Show plan", and it opens when you tick
+  Auto-invite): who is next, who is skipped
   and why (full, no room for your role, contacted 4 min ago, class not
   ticked...), and how old the results are. Addons can't search by
   themselves, so it tells you when to press Refresh.

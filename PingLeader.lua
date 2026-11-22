@@ -7,9 +7,9 @@
 -- Form my group: PingLeader works out which roles your 5-player group still
 -- needs (1 tank, 1 healer, 3 DPS, counting your own role and invites not yet
 -- answered) and picks solo players of the ticked classes who list one of
--- them. "Invite next" invites one per click; "Auto-invite" invites them as
--- they show up in the results. "Dry run" invites nobody: the plan popup shows
--- who it would invite and why.
+-- them. "Invite next" invites one per click; "Auto-invite" (off unless you
+-- tick it) invites them as they show up in the results. The plan popup
+-- previews who it would invite and why.
 --
 -- Nothing is ever sent automatically to someone it would not also invite to
 -- an open slot: automated whisper spam gets reported and can get the account
@@ -94,7 +94,7 @@ local function DB()
     if f.whisper == nil then f.whisper = false end
     if f.invite == nil then f.invite = true end
     if f.auto == nil then f.auto = false end
-    if f.dryrun == nil then f.dryrun = true end
+    f.dryrun = nil -- Dry run was removed; drop the old setting
     f.minLevel = tonumber(f.minLevel) or 0
     if not f.classes then
         f.classes = {}
@@ -583,10 +583,8 @@ local function FormHead(plan)
         mode = "Group invite is off: nobody will be invited."
     elseif not f.auto then
         mode = "Auto-invite is off: click Invite next to invite the next one."
-    elseif f.dryrun then
-        mode = "|cffffd200Dry run: nobody is invited.|r Untick Dry run to invite for real."
     else
-        mode = "|cff33ff33Auto-invite is on.|r"
+        mode = "|cff33ff33Auto-invite is on:|r it invites the INVITE rows, one every " .. AUTO_GAP .. " seconds."
     end
     return GroupStatus(plan) .. "\n" .. mode
 end
@@ -642,7 +640,7 @@ local autoWait = false
 
 local function AutoInvite(plan)
     local f = DB().form
-    if plan.mode ~= "form" or autoWait or not (f.auto and f.invite) or f.dryrun then return end
+    if plan.mode ~= "form" or autoWait or not (f.auto and f.invite) then return end
     if NotLeader() then return end
     local e = plan.picks[1]
     if not e then return end
@@ -670,7 +668,7 @@ local function Announce(plan)
         end
     end
     if not new or not m.sound then return end
-    if plan.mode == "form" and f.auto and f.invite and not f.dryrun then return end
+    if plan.mode == "form" and f.auto and f.invite then return end
     if GetTime() - lastSound < 5 then return end
     lastSound = GetTime()
     pcall(PlaySound, SOUNDKIT and SOUNDKIT.IG_PLAYER_INVITE or 880, "Master")
@@ -825,10 +823,10 @@ local function MessageBox(parent, label, y, s)
     edits[#edits + 1] = edit
 end
 
--- Opt-in sound checkbox for settings table s.
-local function SoundCheck(parent, s, y)
+-- Opt-in sound checkbox for settings table s, at x, y.
+local function SoundCheck(parent, s, x, y)
     local c = Check(parent, "Sound on new match", function() return s.sound end, function(v) s.sound = v end)
-    c:SetPoint("TOPLEFT", 10, y)
+    c:SetPoint("TOPLEFT", x, y)
     Tip(c, "Sound on new match", "Plays the invite sound when someone new shows up who you'd contact, so you can do "
         .. "something else while you wait. You still have to press Refresh: addons can't search by themselves.")
 end
@@ -879,7 +877,7 @@ local function JoinOptions(parent, j)
         Check(parent, r[2], function() return j.roles[key] end, function(v) j.roles[key] = v or nil end)
             :SetPoint("TOPLEFT", 10 + (i - 1) * 70, -142)
     end
-    SoundCheck(parent, j, -168)
+    SoundCheck(parent, j, 10, -168)
     SmallButton(parent, "Show plan", 96, function() ShowPlan() end):SetPoint("BOTTOMRIGHT", -14, 12)
 end
 
@@ -896,14 +894,9 @@ local function FormOptions(parent, f)
     end)
     auto:SetPoint("TOPLEFT", 10, -120)
     Tip(auto, "Auto-invite", "Invites solo players for your open roles as they appear in the results, one every "
-        .. AUTO_GAP .. " seconds. Needs Group invite ticked.")
-    local dry = Check(parent, "Dry run (popup only)", function() return f.dryrun end, function(v)
-        f.dryrun = v
-        if v then ShowPlan(true) end
-    end)
-    dry:SetPoint("TOPLEFT", 130, -120)
-    Tip(dry, "Dry run", "Auto-invite invites nobody. The plan popup shows who it would invite and why.")
-    SoundCheck(parent, f, -142)
+        .. AUTO_GAP .. " seconds, until the group is full. Needs Group invite ticked. Ticking it opens the plan "
+        .. "popup, which shows who it will invite.")
+    SoundCheck(parent, f, 10, -142)
     Label(parent, "Min level", 150, -147)
     local lvl = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
     lvl:SetSize(28, 18)
