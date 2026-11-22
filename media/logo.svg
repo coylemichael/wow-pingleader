@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <!-- PingLeader logo: a speech bubble with a leader's crown, sending signal waves.
+       Edit in any text editor, Inkscape or Figma, then export to logo.png:
+         magick media/logo.svg media/logo.png -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#10404E"/>
+      <stop offset="1" stop-color="#061820"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" fill="url(#bg)"/>
+
+  <!-- speech bubble and its tail -->
+  <g fill="#F6ECD6">
+    <rect x="65" y="165" width="290" height="215" rx="55"/>
+    <polygon points="130,375 120,450 200,375"/>
+  </g>
+
+  <!-- crown: body, band and three jewels -->
+  <polygon points="120,330 120,245 165,287.5 210,217.5 255,287.5 300,245 300,330" fill="#ECBE48"/>
+  <rect x="120" y="320" width="180" height="20" fill="#A8761E"/>
+  <g fill="#ECBE48">
+    <circle cx="120" cy="245" r="13.75"/>
+    <circle cx="210" cy="217.5" r="13.75"/>
+    <circle cx="300" cy="245" r="13.75"/>
+  </g>
+
+  <!-- signal waves from the bubble's top right corner -->
+  <g fill="none" stroke="#ECBE48" stroke-width="16">
+    <path d="M376.43,126.68 A34.5,34.5 0 0 1 400.82,151.07"/>
+    <path d="M384.84,95.28 A67,67 0 0 1 432.22,142.66"/>
+    <path d="M393.25,63.89 A99.5,99.5 0 0 1 463.61,134.25"/>
+  </g>
+</svg>
