@@ -1,0 +1,8 @@
+## Interface: 16001
+## Title: PingLeader
+## Notes: One click whispers the next Looking For Group leader who may still need you.
+## Author: Michael
+## Version: @project-version@
+## SavedVariablesPerCharacter: PingLeaderDB
+
+PingLeader.lua

@@ -1,0 +1,4 @@
+package-as: PingLeader
+
+ignore:
+    - README.md
